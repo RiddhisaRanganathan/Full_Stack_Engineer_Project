@@ -1,0 +1,73 @@
+name: festival-flash
+x-app: &app
+  build: .
+  image: festival-flash-app
+  restart: unless-stopped
+  environment: &env
+    DATABASE_URL: postgres://flash:flash_local@postgres:5432/flash
+    REDIS_URL: redis://redis:6379
+    AMQP_URL: amqp://flash:flash_local@rabbit:5672
+    SALE_START: ${SALE_START:-2026-10-28T14:30:00Z}
+    RESERVATION_TTL_MS: ${RESERVATION_TTL_MS:-30000}
+    PAYMENT_DELAY_MS: ${PAYMENT_DELAY_MS:-1500}
+    WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-8}
+    DB_POOL_MAX: ${DB_POOL_MAX:-12}
+    QUEUE_LIMIT: ${QUEUE_LIMIT:-2000}
+    RATE_LIMIT: ${RATE_LIMIT:-20}
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+    rabbit: {condition: service_healthy}
+    migrate: {condition: service_completed_successfully}
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment: {POSTGRES_USER: flash, POSTGRES_PASSWORD: flash_local, POSTGRES_DB: flash}
+    ports: ['127.0.0.1:5432:5432']
+    volumes: ['pgdata:/var/lib/postgresql/data']
+    healthcheck: {test: ['CMD-SHELL', 'pg_isready -U flash -d flash'], interval: 2s, timeout: 3s, retries: 30}
+    restart: unless-stopped
+  redis:
+    image: redis:7-bookworm
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory', '128mb', '--maxmemory-policy', 'noeviction']
+    ports: ['127.0.0.1:6379:6379']
+    volumes: ['redisdata:/data']
+    healthcheck: {test: ['CMD', 'redis-cli', 'ping'], interval: 2s, timeout: 3s, retries: 30}
+    restart: unless-stopped
+  rabbit:
+    image: rabbitmq:4-management
+    environment: {RABBITMQ_DEFAULT_USER: flash, RABBITMQ_DEFAULT_PASS: flash_local, RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: '+S 2:2'}
+    ports: ['127.0.0.1:5672:5672']
+    volumes: ['rabbitdata:/var/lib/rabbitmq']
+    healthcheck: {test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping'], interval: 5s, timeout: 5s, retries: 30}
+    restart: unless-stopped
+  migrate:
+    build: .
+    image: festival-flash-app
+    command: ['node', 'src/migrate.js']
+    environment: *env
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    <<: *app
+    environment:
+      <<: *env
+      TRUST_PROXY: '1'
+  relay:
+    <<: *app
+    command: ['node', 'src/relay.js']
+  worker:
+    <<: *app
+    command: ['node', 'src/worker.js']
+  gateway:
+    image: nginx:1.28-bookworm
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
+    ports: ['8080:8080']
+    volumes: ['./infra/nginx.conf:/etc/nginx/nginx.conf:ro']
+    depends_on: [api]
+    restart: unless-stopped
+volumes:
+  pgdata:
+  redisdata:
+  rabbitdata:
